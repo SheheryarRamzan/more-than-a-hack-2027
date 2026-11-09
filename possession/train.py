@@ -47,6 +47,9 @@ def save_models(models, names, path=MODEL_PATH, matches=()):
     os.makedirs(os.path.dirname(path), exist_ok=True)
     payload = {"trained_on": "IDSSE open data (CC BY 4.0), matches " + ", ".join(matches),
                "dead": _pack(models[0], names[0]), "team": _pack(models[1], names[1])}
+    if len(models) == 4:
+        payload["dead2"] = _pack(models[2], validate.STAGE2_NAMES)
+        payload["team2"] = _pack(models[3], validate.STAGE2_NAMES)
     with open(path, "w", newline="\n") as handle:
         json.dump(payload, handle, indent=1)
     return path
@@ -55,7 +58,10 @@ def save_models(models, names, path=MODEL_PATH, matches=()):
 def load_models(path=MODEL_PATH):
     with open(path) as handle:
         payload = json.load(handle)
-    return (_unpack(payload["dead"]), _unpack(payload["team"])), payload
+    models = (_unpack(payload["dead"]), _unpack(payload["team"]))
+    if "dead2" in payload:
+        models += (_unpack(payload["dead2"]), _unpack(payload["team2"]))
+    return models, payload
 
 
 def main():

@@ -167,19 +167,22 @@ def prepare(cfg, matches=None, verbose=True, degrade_kw=None):
     return out
 
 
-def fit_models(train, cfg):
-    """(dead_model, team_model) fitted on the training matches."""
+def _rows(train, dead_mats, team_mats):
+    """Stacked training rows (every SUBSAMPLE-th graded frame) for the dead and team models."""
     dx, dy, tx, ty = [], [], [], []
-    for p in train:
+    for p, dX, tX in zip(train, dead_mats, team_mats):
         truth = p["truths"][TRAIN_LEVEL]
-        g = p["feats"]["graded"]
-        idx = np.flatnonzero(g)[::SUBSAMPLE]
-        dx.append(p["dead_X"][idx])
+        idx = np.flatnonzero(p["feats"]["graded"])[::SUBSAMPLE]
+        dx.append(dX[idx])
         dy.append((truth[idx] == "D").astype(float))
         alive = idx[np.isin(truth[idx], ["H", "A"])]
-        tx.append(p["team_X"][alive])
+        tx.append(tX[alive])
         ty.append((truth[alive] == "H").astype(float))
-    dx, dy, tx, ty = map(np.concatenate, (dx, dy, tx, ty))
+    return tuple(map(np.concatenate, (dx, dy, tx, ty)))
+
+
+def _fit_pair(dx, dy, tx, ty, cfg, stage2=False):
+    """(dead_model, team_model): dead with the training games' base rate, team balanced."""
     w_dead = np.full(len(dy), 1.0 / len(dy))
     if cfg.model_dead_balanced:
         for c in (0.0, 1.0):
@@ -188,17 +191,58 @@ def fit_models(train, cfg):
     for c in (0.0, 1.0):
         w_team[ty == c] = 0.5 / max((ty == c).sum(), 1)
     if cfg.model_hgb:
-        return _fit_hgb(dx, dy, w_dead, cfg), _fit_hgb(tx, ty, w_team, cfg)
-    dead_model = calibrate.fit_logistic(dx, dy, w_dead * 2000.0, cfg.calib_l2)
-    team_model = calibrate.fit_logistic(tx, ty, w_team * 2000.0, cfg.calib_l2)
-    return dead_model, team_model
+        return _fit_hgb(dx, dy, w_dead, cfg, stage2), _fit_hgb(tx, ty, w_team, cfg, stage2)
+    return (calibrate.fit_logistic(dx, dy, w_dead * 2000.0, cfg.calib_l2),
+            calibrate.fit_logistic(tx, ty, w_team * 2000.0, cfg.calib_l2))
 
 
-def _fit_hgb(X, y, w, cfg):
+def stage2_matrix(feats, l_dead, l_team):
+    """Inputs of the second-stage models: temporal aggregates of the first-stage log-odds.
+
+    Lets a model learn patterns over time that one frame cannot show -- evidence that flips and
+    flips back (a deflection), team evidence fading into a stoppage, a restart's build-up.
+    """
+    mm = features.moving_nanmean
+    cols = []
+    for l in (l_dead, l_team):
+        flips = np.abs(np.diff(np.sign(l), prepend=np.sign(l[:1]))) > 0
+        cols += [l, mm(l, -25, 0), mm(l, 1, 26), mm(l, -125, 0), mm(l, 1, 126),
+                 mm(l, -375, 376), mm(flips.astype(float), -50, 51)]
+    cols += [feats["team_ev"], feats["known"].astype(float)]
+    X = np.column_stack(cols)
+    return np.where(np.isfinite(X), X, 0.0)
+
+
+STAGE2_NAMES = [p + s for p in ("dead_", "team_") for s in
+                ("logit", "past_1s", "next_1s", "past_5s", "next_5s", "15s", "flip_rate_2s")] \
+    + ["control", "ball_known"]
+
+
+def fit_models(train, cfg):
+    """(dead, team) models fitted on the training matches; with cfg.stack also the second stage,
+    trained on OUT-OF-FOLD first-stage predictions (each training match predicted by a first
+    stage fitted without it), returned as (dead1, team1, dead2, team2)."""
+    first = _fit_pair(*_rows(train, [p["dead_X"] for p in train], [p["team_X"] for p in train]),
+                      cfg)
+    if not cfg.stack:
+        return first
+    mats = []
+    for j, p in enumerate(train):
+        others = train[:j] + train[j + 1:]
+        d1, t1 = _fit_pair(*_rows(others, [q["dead_X"] for q in others],
+                                  [q["team_X"] for q in others]), cfg)
+        mats.append(stage2_matrix(p["feats"], _logit(p["dead_X"], d1), _logit(p["team_X"], t1)))
+    second = _fit_pair(*_rows(train, mats, mats), cfg, stage2=True)
+    return first + second
+
+
+def _fit_hgb(X, y, w, cfg, stage2=False):
     """Gradient-boosted trees (scikit-learn), deterministic: fixed seed, no early stopping."""
     from sklearn.ensemble import HistGradientBoostingClassifier
-    model = HistGradientBoostingClassifier(max_iter=cfg.hgb_iter, learning_rate=cfg.hgb_lr,
-                                           max_leaf_nodes=cfg.hgb_leaves,
+    model = HistGradientBoostingClassifier(max_iter=cfg.stack_iter if stage2 else cfg.hgb_iter,
+                                           learning_rate=cfg.hgb_lr,
+                                           max_leaf_nodes=cfg.stack_leaves if stage2
+                                           else cfg.hgb_leaves,
                                            min_samples_leaf=cfg.hgb_min_leaf,
                                            l2_regularization=cfg.hgb_l2,
                                            early_stopping=False, random_state=0)
@@ -214,16 +258,20 @@ def _logit(X, model):
 
 def model_scores(feats, team_X, models, cfg, dead_X=None):
     """(ldead, team_score) per frame from fitted models."""
-    dead_model, team_model = models
+    dead_model, team_model = models[0], models[1]
     dead_X = dead_matrix(feats, cfg) if dead_X is None else dead_X
     for X, model, what in ((dead_X, dead_model, "dead"), (team_X, team_model, "team")):
         expected = getattr(model, "n_features_in_", None)
         if expected is not None and X.shape[1] != expected:
             raise ValueError("{} model expects {} features, got {}: the config does not match the "
                              "saved models (context_features?)".format(what, expected, X.shape[1]))
-    ldead = np.clip(_logit(dead_X, dead_model) * cfg.model_dead_scale
+    l_dead, l_team = _logit(dead_X, dead_model), _logit(team_X, team_model)
+    if len(models) == 4:                                  # second stage on temporal aggregates
+        X2 = stage2_matrix(feats, l_dead, l_team)
+        l_dead, l_team = _logit(X2, models[2]), _logit(X2, models[3])
+    ldead = np.clip(l_dead * cfg.model_dead_scale
                     + cfg.dead_prior_logodds, -cfg.dead_evidence_clip, cfg.dead_evidence_clip)
-    team = np.clip(_logit(team_X, team_model), -cfg.model_team_clip,
+    team = np.clip(l_team, -cfg.model_team_clip,
                    cfg.model_team_clip) * cfg.model_team_scale
     team = np.where(feats["direction"] != 0, team, 0.0)
     return ldead, team

@@ -184,7 +184,33 @@ def decode_teams(feats, dead, restarts, cfg, team_score=None):
             # taker) sets the starting team, then only the alive part is kept.
             lead = max(s - rw, lo)
             home[s:e] = viterbi2(score[lead:e], cfg.team_switch)[s - lead:]
+            if cfg.team_snap_window > 0:
+                snap_team_edges(home, s, e, feats["team_ev"], cfg)
     return home
+
+
+def snap_team_edges(home, s, e, team_ev, cfg):
+    """Move each home<->away change inside [s, e) to the first frame of clear control by the team
+    that gains the ball, if one lies within team_snap_window frames. The decoder places a change
+    where the smoothed evidence tips over, which can lag the moment the ball is actually won.
+    A change never moves past a neighbouring change."""
+    window = home[s:e]
+    edges = (np.flatnonzero(window[1:] != window[:-1]) + 1).tolist()
+    w = cfg.team_snap_window
+    for i, t in enumerate(edges):
+        new_home = bool(window[t])
+        lo = max(t - w, edges[i - 1] + 1 if i else 1)
+        hi = min(t + w, edges[i + 1] - 1 if i + 1 < len(edges) else len(window) - 1)
+        ev = team_ev[s + lo:s + hi + 1]
+        hits = np.flatnonzero(ev >= cfg.team_snap_threshold) if new_home \
+            else np.flatnonzero(ev <= -cfg.team_snap_threshold)
+        if not len(hits):
+            continue
+        f = lo + int(hits[0])
+        if f < t:
+            window[f:t] = new_home
+        elif f > t:
+            window[t:f] = not new_home
 
 
 def restart_kind(x, y, length, width):

@@ -76,8 +76,12 @@ class Config:
     # Share of graded time the ball is dead, as a prior from OTHER games: LaLiga's effective
     # playing time is ~53-56 min, and the graded window here is 105.9 min including 2 min before
     # the second-half kick-off, so dead ~ 0.47-0.50. The alive/dead threshold is shifted until the
-    # decoded share matches. 0 disables this and keeps the balanced model's own threshold.
-    target_dead_share: float = 0.48
+    # decoded share matches. 0 disables this and keeps the model's own threshold.
+    # Rule fixed before looking at the competition match: keep the trained model's own threshold if
+    # the dead share it gives there is plausible (0.43-0.53), otherwise force 0.48. v3 and v4 gave
+    # 0.416 / 0.417 (forced to 0.48); v5 gives 0.434, so its own threshold is kept -- which is
+    # also what scores best on validation (0.5558 vs 0.5480 forced).
+    target_dead_share: float = 0.0
     share_search_iters: int = 18
 
     # -- supervised models trained on OTHER matches (possession/validate.py, train.py) ------------
@@ -92,6 +96,9 @@ class Config:
     hgb_leaves: int = 63                  # [validated] leaves per tree (31: 0.5326, 63: 0.5348)
     hgb_min_leaf: int = 200               # minimum samples per leaf
     hgb_l2: float = 1.0                   # L2 regularisation
+    stack: int = 1                        # [validated] second stage on temporal aggregates: 0.5350 -> 0.5485
+    stack_iter: int = 100                 # second stage: number of trees
+    stack_leaves: int = 31                # second stage: leaves per tree
     model_dead_balanced: int = 0          # 0: learn the dead-ball base rate from the training games
     model_dead_scale: float = 1.0
     model_team_scale: float = 1.0
@@ -108,7 +115,7 @@ class Config:
     # -- stage 1: alive / dead decoding ----------------------------------------------------------
     # Decoder settings below marked [validated] were chosen by leave-one-match-out spellF1 on the
     # seven open IDSSE matches (possession/tune.py), never on the competition match.
-    alive_dead_switch: float = 96.0       # [validated] evidence needed to flip alive <-> dead
+    alive_dead_switch: float = 48.0       # [validated] evidence needed to flip alive <-> dead
     min_dead: int = 25                    # [validated] a stoppage shorter than 1 s is not one
     min_alive: int = 38                   # [validated] live play shorter than 1.5 s between stoppages
 
@@ -128,7 +135,7 @@ class Config:
     # -- stage 2: home / away decoding -----------------------------------------------------------
     # [validated] Evidence (in team-model log-odds summed over frames) needed to hand possession
     # to the other team: a touch or a deflection does not pay it, sustained control does.
-    team_switch: float = 8.0
+    team_switch: float = 4.0
     # Each alive stretch is decoded together with the restart_window frames before it, so the
     # player standing over the dead ball -- the taker -- decides who starts with it.
     restart_window: int = 25
@@ -142,6 +149,9 @@ class Config:
     rule_bias: float = 0.0
     rule_ball_window: int = 50            # ball position read within 2 s before the restart
     rule_touch_window: int = 50           # last touch read within 2 s before the stoppage
+    # Snap home<->away changes to the first frame of clear control (decode.snap_team_edges).
+    team_snap_window: int = 12            # [validated] frames either side searched; 0 disables
+    team_snap_threshold: float = 0.5      # |control evidence| that counts as clear control
 
     # -- boundary refinement ---------------------------------------------------------------------
     snap_kick_window: int = 50            # a dead->alive edge snaps to a kick within ±2 s

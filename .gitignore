@@ -60,6 +60,7 @@ organizers/
 __pycache__/
 *.py[cod]
 .venv/
+.venv-detect/
 venv/
 env/
 .DS_Store

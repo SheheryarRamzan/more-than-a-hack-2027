@@ -35,7 +35,8 @@ validation matches are about as hard as the real one (slightly harder).
 | Smart Tagging — goals | stoppage from the ball in the goal mouth to the following kick-off |
 | tactical homography | tried as a coarse ball position (camera aim point) and **dropped** — see §6 |
 | **IDSSE open data** (other games) | training and validation of the per-frame models and the decoder settings |
-| broadcast video/ATD/homography, tactical video | not used |
+| tactical video | tried for re-detecting the ball and **dropped** — see §6 |
+| broadcast video/ATD/homography | not used |
 
 **IDSSE** (Bassek, Weber, Rein & Memmert, *An integrated dataset of synchronized spatiotemporal
 and event data in elite soccer*, Scientific Data 2025; CC BY 4.0): seven full German Bundesliga /
@@ -129,6 +130,21 @@ ball missing and missing for long.
 |---|---|---|
 | restart team from the Laws of the Game (corner → attackers of that end, goal kick → defenders, throw-in / kick-off → opponents of the last toucher) | 0.4881 / 0.4878 / 0.4853 at strength 0.5 / 1 / 2, vs 0.4883 without | "last toucher" read from noisy tracking is less reliable than who stands over the ball |
 | camera aim from the homography as a ball position when the ball is lost | 0.4608 vs 0.4596 (logistic) | +0.001 is noise, and validating it needs a synthetic camera for the open matches |
+| re-detecting the ball in the tactical video with FootAndBall (Komorowski et al. 2020, MIT; built for long-shot football) on the GPU, to fill the ATD's ball gaps | see below | too little gain for the cost and a reproducibility risk |
+
+*Ball detector, in detail.* The ball is ~4.4 px across in the tactical video (median over tracked
+frames; p10 3.2, p90 6.4). Pilot on 5,000 frames at native resolution: a candidate within 1.5 m of
+the tracked ball on 1.3 % of frames — the model does not see a ball that small. Upscaled 2×
+(1,000 frames, 4.4 frames/s on an RTX 3060 laptop GPU): median distance to the tracked ball 0.9 m,
+but only ~70 % of confident detections agree with it, and linking candidates into moving tracklets
+does not raise that (62–72 % at every setting — the false hits are persistent objects, not
+flicker); it fills ~20 % of the frames where the tracking has no ball. On validation, *perfectly*
+filling half of the live-play gaps would add +0.025 spellF1 and most of them +0.048; filling ~20 %
+at ~70 % reliability is worth roughly +0.01 at best, a quarter of the 0.04 noise band, and wrong
+balls can flip possession. Against that: 10–12 GPU-hours per run, and GPU inference that may differ
+in the last bits on another machine, which would break the rule that the repository must
+regenerate the submitted file exactly. The code is kept in `detector/` and `possession/ball_fusion.py`
+for reference; the submission does not use it.
 
 ## 7. Possession rules implemented
 

@@ -55,7 +55,7 @@ def team_names(feats):
     return CONTROL_NAMES + list(feats["team_x_names"])
 
 
-def prepare(cfg, matches=None, verbose=True):
+def prepare(cfg, matches=None, verbose=True, degrade_kw=None):
     """Degraded features, synthetic tags and harmonised truths for each external match."""
     matches = matches or [m for m in external.MATCHES if external.path_of(m, "tracking")]
     trk_atd = atd.load(verbose=False)
@@ -64,7 +64,8 @@ def prepare(cfg, matches=None, verbose=True):
     for i, mid in enumerate(matches):
         t = time.time()
         m = external.load(mid)
-        deg = external.degrade(m, run_lengths, seed=1000 + external.MATCHES.index(mid))
+        deg = external.degrade(m, run_lengths, seed=1000 + external.MATCHES.index(mid),
+                               **(degrade_kw or {}))
         if cfg.use_camera:
             from possession import camera
             deg["aim_x"] = camera.synthetic_aim(m["ball"][:, 0].astype(float) * m["pitch"][0],

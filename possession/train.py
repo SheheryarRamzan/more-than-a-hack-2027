@@ -64,7 +64,8 @@ def main():
         external.download(mid)
     prepared = validate.prepare(cfg, list(external.MATCHES))
     models = validate.fit_models(prepared, cfg)
-    names = (prepared[0]["feats"]["dead_x_names"], validate.team_names(prepared[0]["feats"]))
+    names = (validate.dead_names(prepared[0]["feats"], cfg),
+             validate.team_names(prepared[0]["feats"], cfg))
     path = save_models(models, names, matches=external.MATCHES)
     print("wrote {}".format(os.path.relpath(path, ROOT)))
     for label, model, cols in (("dead", models[0], names[0]), ("team", models[1], names[1])):

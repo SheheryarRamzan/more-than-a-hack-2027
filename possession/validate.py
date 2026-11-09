@@ -36,7 +36,71 @@ SUBSAMPLE = 5           # consecutive frames are near-duplicates; every 5th is p
 CODE = {"H": 0, "A": 1, "D": 2, "X": 3}
 
 
-def team_matrix(feats):
+def _last_next(mask):
+    """(index of the last True at or before t, index of the next True at or after t)."""
+    n = len(mask)
+    idx = np.arange(n)
+    last = np.maximum.accumulate(np.where(mask, idx, -1))
+    nxt = np.minimum.accumulate(np.where(mask, idx, n)[::-1])[::-1]
+    return last, nxt
+
+
+def _ages(mask, cap_s=60.0):
+    """(seconds since mask was last True, seconds until it is next True, last, next), capped."""
+    n = len(mask)
+    idx = np.arange(n)
+    last, nxt = _last_next(mask)
+    since = np.where(last >= 0, (idx - last) / 25.0, cap_s)
+    until = np.where(nxt < n, (nxt - idx) / 25.0, cap_s)
+    return np.minimum(since, cap_s), np.minimum(until, cap_s), last, nxt
+
+
+def team_context(feats):
+    """Bracketing and slow context for the team model (positive favours home).
+
+    Inside a long ball gap the best evidence is which team clearly had the ball just before it and
+    just after it, and how long ago / how soon that was; plus slower versions of the shape signals.
+    The match is processed offline, so looking ahead is legitimate.
+    """
+    ev = feats["team_ev"]
+    n = len(ev)
+    since, until, last, nxt = _ages(np.abs(ev) >= 0.5)
+    last_sign = np.where(last >= 0, np.sign(ev[np.maximum(last, 0)]), 0.0)
+    next_sign = np.where(nxt < n, np.sign(ev[np.minimum(nxt, n - 1)]), 0.0)
+    ball_since, ball_until, _, _ = _ages(feats["known"])
+    tx = feats["team_x"]
+    mm = features.moving_nanmean
+    cols = [last_sign, next_sign, np.log1p(since), np.log1p(until),
+            last_sign * np.exp(-since / 5.0), next_sign * np.exp(-until / 5.0),
+            mm(ev, -50, 0), mm(ev, 1, 51),
+            np.log1p(ball_since), np.log1p(ball_until),
+            mm(tx[:, 1], -125, 126), mm(tx[:, 1], -250, 251),
+            mm(tx[:, 0], -125, 126), mm(tx[:, 5], -125, 126), mm(tx[:, 3], -125, 126)]
+    names = ["last_control_team", "next_control_team", "log_s_since_control",
+             "log_s_until_control", "last_control_decay5s", "next_control_decay5s",
+             "control_past_2s", "control_future_2s", "log_s_since_ball", "log_s_until_ball",
+             "goal_side_5s", "goal_side_10s", "forward_velocity_5s", "centroid_5s", "width_5s"]
+    return cols, names
+
+
+def dead_context(feats):
+    """Context for the dead-ball model: ball sightings, acceleration into a restart, recent outs."""
+    dx = feats["dead_x"]
+    mm = features.moving_nanmean
+    ball_since, ball_until, _, _ = _ages(feats["known"])
+    log_int = dx[:, 1]
+    cols = [np.log1p(ball_since), np.log1p(ball_until),
+            mm(log_int, 1, 51) - mm(log_int, -50, 0),       # players speeding up = restart
+            mm(log_int, -125, 126), mm(dx[:, 2], -125, 126),
+            mm(dx[:, 3], -125, 1), mm(dx[:, 3], 0, 126),    # ball out in the last / next 5 s
+            mm(dx[:, 7], -125, 126)]
+    names = ["log_s_since_ball", "log_s_until_ball", "intensity_acceleration_2s",
+             "log_intensity_5s", "running_share_5s", "ball_out_past_5s", "ball_out_next_5s",
+             "ball_missing_share_5s"]
+    return cols, names
+
+
+def team_matrix(feats, cfg=None):
     """Per-frame inputs of the team model. Columns oriented so positive favours home."""
     ev = feats["team_ev"]
     cols = [ev,
@@ -44,6 +108,16 @@ def team_matrix(feats):
             features.moving_nanmean(ev, -50, 51),
             features.moving_nanmean(ev, -125, 126)]
     X = np.column_stack(cols + [feats["team_x"]])
+    if cfg is not None and cfg.context_features:
+        X = np.column_stack([X] + team_context(feats)[0])
+    return np.where(np.isfinite(X), X, 0.0)
+
+
+def dead_matrix(feats, cfg=None):
+    """Per-frame inputs of the dead-ball model."""
+    X = feats["dead_x"]
+    if cfg is not None and cfg.context_features:
+        X = np.column_stack([X] + dead_context(feats)[0])
     return np.where(np.isfinite(X), X, 0.0)
 
 
@@ -51,8 +125,18 @@ CONTROL_NAMES = ["control", "control_1s", "control_4s", "control_10s"]
 TEAM_NAMES = CONTROL_NAMES + features.TEAM_X_NAMES
 
 
-def team_names(feats):
-    return CONTROL_NAMES + list(feats["team_x_names"])
+def team_names(feats, cfg=None):
+    names = CONTROL_NAMES + list(feats["team_x_names"])
+    if cfg is not None and cfg.context_features:
+        names += team_context(feats)[1]
+    return names
+
+
+def dead_names(feats, cfg=None):
+    names = list(feats["dead_x_names"])
+    if cfg is not None and cfg.context_features:
+        names += dead_context(feats)[1]
+    return names
 
 
 def prepare(cfg, matches=None, verbose=True, degrade_kw=None):
@@ -76,7 +160,8 @@ def prepare(cfg, matches=None, verbose=True, degrade_kw=None):
         events = external.synth_tags(m, seed=2000 + external.MATCHES.index(mid))
         truths = {lvl: external.harmonise(m["labels"], m["halves"], lvl) for lvl in CONTROL_LEVELS}
         out.append({"id": mid, "feats": feats, "events": events, "truths": truths,
-                    "team_X": team_matrix(feats), "deg": deg})
+                    "team_X": team_matrix(feats, cfg), "dead_X": dead_matrix(feats, cfg),
+                    "deg": deg})
         if verbose:
             print("  prepared {}  ({:.0f} s)".format(mid, time.time() - t))
     return out
@@ -89,7 +174,7 @@ def fit_models(train, cfg):
         truth = p["truths"][TRAIN_LEVEL]
         g = p["feats"]["graded"]
         idx = np.flatnonzero(g)[::SUBSAMPLE]
-        dx.append(p["feats"]["dead_x"][idx])
+        dx.append(p["dead_X"][idx])
         dy.append((truth[idx] == "D").astype(float))
         alive = idx[np.isin(truth[idx], ["H", "A"])]
         tx.append(p["team_X"][alive])
@@ -103,17 +188,19 @@ def fit_models(train, cfg):
     for c in (0.0, 1.0):
         w_team[ty == c] = 0.5 / max((ty == c).sum(), 1)
     if cfg.model_hgb:
-        return _fit_hgb(dx, dy, w_dead), _fit_hgb(tx, ty, w_team)
+        return _fit_hgb(dx, dy, w_dead, cfg), _fit_hgb(tx, ty, w_team, cfg)
     dead_model = calibrate.fit_logistic(dx, dy, w_dead * 2000.0, cfg.calib_l2)
     team_model = calibrate.fit_logistic(tx, ty, w_team * 2000.0, cfg.calib_l2)
     return dead_model, team_model
 
 
-def _fit_hgb(X, y, w):
+def _fit_hgb(X, y, w, cfg):
     """Gradient-boosted trees (scikit-learn), deterministic: fixed seed, no early stopping."""
     from sklearn.ensemble import HistGradientBoostingClassifier
-    model = HistGradientBoostingClassifier(max_iter=200, learning_rate=0.05, max_leaf_nodes=31,
-                                           min_samples_leaf=200, l2_regularization=1.0,
+    model = HistGradientBoostingClassifier(max_iter=cfg.hgb_iter, learning_rate=cfg.hgb_lr,
+                                           max_leaf_nodes=cfg.hgb_leaves,
+                                           min_samples_leaf=cfg.hgb_min_leaf,
+                                           l2_regularization=cfg.hgb_l2,
                                            early_stopping=False, random_state=0)
     model.fit(X, y, sample_weight=w * len(w))
     return model
@@ -125,10 +212,16 @@ def _logit(X, model):
     return calibrate.predict_logit(X, model)
 
 
-def model_scores(feats, team_X, models, cfg):
+def model_scores(feats, team_X, models, cfg, dead_X=None):
     """(ldead, team_score) per frame from fitted models."""
     dead_model, team_model = models
-    ldead = np.clip(_logit(feats["dead_x"], dead_model) * cfg.model_dead_scale
+    dead_X = dead_matrix(feats, cfg) if dead_X is None else dead_X
+    for X, model, what in ((dead_X, dead_model, "dead"), (team_X, team_model, "team")):
+        expected = getattr(model, "n_features_in_", None)
+        if expected is not None and X.shape[1] != expected:
+            raise ValueError("{} model expects {} features, got {}: the config does not match the "
+                             "saved models (context_features?)".format(what, expected, X.shape[1]))
+    ldead = np.clip(_logit(dead_X, dead_model) * cfg.model_dead_scale
                     + cfg.dead_prior_logodds, -cfg.dead_evidence_clip, cfg.dead_evidence_clip)
     team = np.clip(_logit(team_X, team_model), -cfg.model_team_clip,
                    cfg.model_team_clip) * cfg.model_team_scale
@@ -169,7 +262,7 @@ def evaluate(prepared, cfg, models=None, verbose=True):
     rows = []
     for k, p in enumerate(prepared):
         fitted = models[k] if models else fit_models(prepared[:k] + prepared[k + 1:], cfg)
-        ldead, team = model_scores(p["feats"], p["team_X"], fitted, cfg)
+        ldead, team = model_scores(p["feats"], p["team_X"], fitted, cfg, p["dead_X"])
         restarts = tags.locate_restarts(p["events"], p["feats"], cfg)
         labels, _ = decode.decode(p["feats"], restarts, [], cfg, ldead=ldead,
                                   team_score=team)

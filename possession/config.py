@@ -86,6 +86,12 @@ class Config:
     # [validated] OFF: +0.001 held-out spellF1 (noise), and it relies on a synthetic camera for the
     # open matches -- not worth the risk.
     use_camera: int = 0                   # 1: camera aim (homography) as a ball proxy, see camera.py
+    context_features: int = 1             # [validated] bracketing / slow context: 0.4897 -> 0.5231
+    hgb_iter: int = 200                   # boosted trees: number of trees
+    hgb_lr: float = 0.05                  # learning rate
+    hgb_leaves: int = 63                  # [validated] leaves per tree (31: 0.5326, 63: 0.5348)
+    hgb_min_leaf: int = 200               # minimum samples per leaf
+    hgb_l2: float = 1.0                   # L2 regularisation
     model_dead_balanced: int = 0          # 0: learn the dead-ball base rate from the training games
     model_dead_scale: float = 1.0
     model_team_scale: float = 1.0
@@ -122,7 +128,7 @@ class Config:
     # -- stage 2: home / away decoding -----------------------------------------------------------
     # [validated] Evidence (in team-model log-odds summed over frames) needed to hand possession
     # to the other team: a touch or a deflection does not pay it, sustained control does.
-    team_switch: float = 16.0
+    team_switch: float = 8.0
     # Each alive stretch is decoded together with the restart_window frames before it, so the
     # player standing over the dead ball -- the taker -- decides who starts with it.
     restart_window: int = 25

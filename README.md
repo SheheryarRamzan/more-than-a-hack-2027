@@ -1,3 +1,24 @@
+> ## Team Matrix AE — our solution
+>
+> Two-stage Viterbi decoding (ball alive/dead, then home/away) over per-frame gradient-boosted
+> models trained on seven open Bundesliga matches (IDSSE, CC BY 4.0) degraded to look like the
+> provided automatic tracking, with every setting chosen by leave-one-match-out validation on
+> those matches. Full write-up: **[TECHNICAL.md](TECHNICAL.md)**.
+>
+> **Regenerate the submission** (Python 3.13; put the data bundle in `data/`, see [DATA.md](DATA.md)):
+>
+> ```bash
+> python -m venv .venv
+> .venv/bin/python -m pip install -r requirements-solution.txt   # .venv\Scripts\python on Windows
+> .venv/bin/python -m possession.run --name matrix_ae            # -> evaluation/results/matrix_ae.csv
+> .venv/bin/python evaluation/validate_submission.py evaluation/results/matrix_ae.csv
+> ```
+>
+> Deterministic: verified byte-identical from a fresh clone in a fresh environment. Our code is
+> in `possession/`; everything below this box is the organisers' original README.
+
+---
+
 # More than a Hack 2027 — Phase 1: Ball Possession
 
 **Organised by [Metrica Sports](https://metrica-sports.com), [FC Barcelona](https://www.fcbarcelona.com)

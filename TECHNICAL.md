@@ -19,8 +19,9 @@ possession", see §4):
 | organisers' baseline (nearest player, ±2 s vote) | 0.2255 | 0.5552 |
 | logistic per-frame models, default decoder | 0.4596 | 0.8315 |
 | gradient-boosted per-frame models, default decoder | 0.4747 | 0.8364 |
-| gradient-boosted, tuned decoder, model's own dead-ball threshold | 0.4897 | 0.8441 |
-| **submitted configuration** (dead-ball share fixed at 0.48, §6) | **0.4863** | **0.8375** |
+| gradient-boosted, tuned decoder, model's own dead-ball threshold (v3) | 0.4897 | 0.8441 |
+| + context features (§5), re-tuned decoder, larger trees (v4) | 0.5350 | 0.8614 |
+| **submitted configuration** (v4, dead-ball share fixed at 0.48, §6) | **0.5248** | **0.8496** |
 
 The organisers' baseline scores 0.2433 / 0.6724 on the competition match itself, so the degraded
 validation matches are about as hard as the real one (slightly harder).
@@ -100,11 +101,22 @@ model transfers between tracking systems), share of players running, a two-compo
 to the match's own intensity, ball beyond a line, ball at rest ≥ 1 s, ball moving inside the pitch,
 ball missing and missing for long.
 
+**Context (v4).** Frame-level evidence is blind inside the ATD's long ball gaps, so both models also
+see context computed over the whole match (offline, so looking ahead is legitimate). Team model:
+which team last had clear control of the ball and which team next has it, how long ago / how soon
+(raw and with a 5 s decay), control over the past and next 2 s, time since / until the ball is seen,
+and 5–10 s versions of the goal-side, forward-speed, centroid and width signals. Dead model: time
+since / until the ball is seen, players speeding up over the next 2 s (a restart), 5 s intensity and
+running share, the ball going out in the last / next 5 s, and the share of missing ball over ±5 s.
+On validation this was the largest single gain: 0.4897 → 0.5231 at unchanged decoder settings, and
+every one of the seven held-out matches improved, by 0.03–0.06.
+
 ## 6. Models and decoding
 
 - **Per-frame models**: gradient-boosted trees (scikit-learn `HistGradientBoostingClassifier`, 200
-  trees, fixed seed, no early stopping) — chosen over logistic regression on validation (0.4747 vs
-  0.4596). Dead model on all graded frames with the training games' base rate; team model on alive
+  trees of up to 63 leaves, ≥ 200 samples per leaf, learning rate 0.05, fixed seed, no early
+  stopping) — chosen over logistic regression on validation (0.4747 vs 0.4596); tree settings by
+  leave-one-match-out search (63 leaves 0.5348 vs 31 leaves 0.5326). Dead model on all graded frames with the training games' base rate; team model on alive
   frames with balanced classes. Trained on all seven matches for the submission.
 - **Stage 1, alive/dead**: Viterbi on the dead log-odds plus restart anchors; minimum stoppage and
   live-play durations; edges snapped to the ball leaving the pitch or the restart kick.
@@ -113,16 +125,18 @@ ball missing and missing for long.
   team Smart Tagging names on a located restart.
 - **Settings**: chosen by coordinate descent on mean leave-one-match-out spellF1 (macroF1 breaking
   ties), two passes, then the two settings that ended on a grid edge re-searched with a wider grid:
-  team switching cost 16, alive/dead switching cost 96, minimum stoppage 1 s, minimum live stretch
-  1.5 s, tag bias 0.5 per frame over ±1 s, restart look-back 1 s. Around the optimum the score is
-  flat (alive/dead cost 48 → 192 moves it by 0.001), so the result is not knife-edge.
-- **Dead-ball share.** Trained on Bundesliga, the dead model calls 41.6 % of the competition match
-  dead with its own threshold. A rule fixed *before* looking at that number: keep the model's
-  threshold if its share is plausible (0.43–0.53), otherwise shift it to the league prior of 0.48
-  (LaLiga effective playing time over the graded 105.9 minutes). 0.416 is outside, so the threshold
-  is shifted. Validation shows the hedge is cheap: forcing 0.44 / 0.48 / 0.52 on the seven matches
-  (true shares 0.41–0.52) scores 0.4920 / 0.4863 / 0.4803 against 0.4897 for the model's own
-  threshold, and the Smart-Tagging-calibrated v2 model independently put this match at ~0.47.
+  team switching cost 8 (v4; 16 in v3 — the context-aware team model is sharper, so less
+  smoothing is needed; 4 / 6 / 8 / 12 score 0.528 / 0.530 / 0.535 / 0.532), alive/dead switching
+  cost 96, minimum stoppage 1 s, minimum live stretch 1.5 s, tag bias 0.5 per frame over ±1 s,
+  restart look-back 1 s. Around the optimum the score is flat, so the result is not knife-edge.
+- **Dead-ball share.** Trained on Bundesliga, the dead model calls 41.7 % of the competition match
+  dead with its own threshold (41.6 % in v3). A rule fixed *before* looking at that number: keep the
+  model's threshold if its share is plausible (0.43–0.53), otherwise shift it to the league prior of
+  0.48 (LaLiga effective playing time over the graded 105.9 minutes). 0.417 is outside, so the
+  threshold is shifted. Validation prices the hedge: for v4, forcing 0.44 / 0.48 on the seven
+  matches (true shares 0.41–0.52) scores 0.5301 / 0.5248 against 0.5350 for the model's own
+  threshold — a cost of about 0.01 if this match is as dead as a Bundesliga one, a gain if it is as
+  dead as a typical LaLiga one; the Smart-Tagging-calibrated v2 model independently put it at ~0.47.
 
 **Tried and dropped on validation**
 
@@ -163,12 +177,19 @@ averaged over in §4; (2) the final file is scored on it once, as a correctness 
 
 ## 9. Results on the competition match (aggregates only)
 
-258 possessions of mean 12.8 s (median 8.2 s), 131 stoppages, dead share 0.48, home share of alive
-time 0.63. Agreement with Smart Tagging's team phases — which the final models never see — is 0.806,
-up from 0.746 for the previous self-supervised version. Public five minutes, scored once as a
-correctness check: macroF1 0.8121, spellF1 0.3867, alive/dead F1 0.942, team accuracy (both alive)
-0.906, 13 possessions against 17. With 17 possessions the bootstrap band on spellF1 is ~0.33 wide,
-so this confirms correctness, not rank.
+v4: 347 possessions of mean 9.5 s, dead share 0.48, home share of alive time 0.60.
+
+Agreement with Smart Tagging's team phases (which the models never see) is 0.774, against 0.806 for
+v3. Checked before adopting v4: the drop comes from v4 predicting more short possessions (15 % of
+alive frames in spells under 5 s, against 7 %), which coarse phase intervals cannot represent; at
+comparable spell lengths v4 agrees as well or better (5–15 s: 0.735 vs 0.677; ≥ 15 s: 0.881 vs
+0.890). On the held-out matches, where real labels exist, those extra possessions are what raises
+spellF1 (truth 375 possessions per match; v4 predicts 284, v3 243).
+
+Public five minutes, scored once per version as a correctness check (v4 was adopted before this
+check): macroF1 0.8543, spellF1 0.5250, alive/dead F1 0.961, team accuracy (both alive) 0.907, 15
+possessions against 17 (v3: 0.8121 / 0.3867). With 17 possessions the bootstrap band on spellF1 is
+~0.33 wide, so this confirms correctness, not rank.
 
 ## 10. Limitations
 
@@ -177,11 +198,11 @@ so this confirms correctness, not rank.
   but not everything (e.g. tracker identity switches, the ATD's own speed estimates).
 - **Label definition.** DFL possession is converted to controlled possession by a rule, and the
   rule's threshold is uncertain; results are averaged over three readings to stay robust to it.
-- **Under-segmentation.** On validation the tuned decoder predicts ~35 % fewer possessions than the
+- **Under-segmentation.** On validation the tuned decoder predicts ~25 % fewer possessions than the
   truth — the official metric prefers fewer, well-placed possessions to more, misplaced ones — so
   short real possessions (quick turnovers) are often missed.
-- **Long ball gaps.** Half of the ATD's missing ball time is in gaps over 20 s; inside them the team
-  call rests on collective shape alone (team accuracy ~0.87 on validation).
+- **Long ball gaps.** Two thirds of the ATD's missing ball time is in gaps over 20 s; inside them the
+  team call rests on context and collective shape (team accuracy 0.874 on validation).
 - **Unused assets.** The videos and the broadcast feed; a ball detector on the tactical video is the
   most promising next step for the long gaps.
 
@@ -189,7 +210,7 @@ so this confirms correctness, not rank.
 
 ```bash
 python -m venv .venv
-.venv/Scripts/python -m pip install -r requirements-lock.txt     # Windows; bin/python elsewhere
+.venv/Scripts/python -m pip install -r requirements-solution.txt  # Windows; bin/python elsewhere
 # put the data bundle in data/ (see DATA.md)
 .venv/Scripts/python -m possession.run --name matrix_ae            # uses the committed models
 .venv/Scripts/python evaluation/validate_submission.py evaluation/results/matrix_ae.csv
@@ -203,5 +224,6 @@ python -m venv .venv
 `possession.run` reads `possession/models/idsse_models.json`, which holds only model parameters
 learned from the seven open matches — nothing from the competition match — so it is committed.
 Deterministic: two runs produce byte-identical files (Python 3.13.13, pinned versions in
-`requirements-lock.txt`). Derived data (caches under `data/cache/`, the open data under
+`requirements-solution.txt`; verified byte-identical from a fresh clone in a fresh environment;
+`requirements-lock.txt` is the full Windows development freeze). Derived data (caches under `data/cache/`, the open data under
 `data/external/`) is gitignored with the rest of `data/`.

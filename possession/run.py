@@ -106,7 +106,8 @@ def build(cfg, use_cache=True, verbose=True):
         # Models trained on the open IDSSE matches (other games), see possession/train.py.
         from possession import train, validate
         models, payload = train.load_models()
-        ldead, team_score = validate.model_scores(feats, validate.team_matrix(feats), models, cfg)
+        ldead, team_score = validate.model_scores(feats, validate.team_matrix(feats, cfg),
+                                                  models, cfg)
         calib = {"source": payload["trained_on"]}
         team_model = {"source": payload["trained_on"]}
     else:

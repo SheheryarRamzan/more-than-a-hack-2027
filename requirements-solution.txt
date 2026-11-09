@@ -1,0 +1,19 @@
+# Exactly what `python -m possession.run` needs to regenerate the submission, pinned to the versions
+# that produced it (Python 3.13.13). Cross-platform: unlike requirements-lock.txt, which is a full
+# freeze of the Windows development environment (notebooks, pywinpty, ...), nothing here is
+# OS-specific.
+#
+#   python -m venv .venv
+#   .venv/bin/python -m pip install -r requirements-solution.txt      # Scripts\python on Windows
+#   .venv/bin/python -m possession.run --name matrix_ae
+#
+# scikit-learn must match exactly: possession/models/idsse_models.json stores its fitted models.
+numpy==2.5.4
+pandas==3.1.1
+scikit-learn==1.9.1
+scipy==1.18.1
+joblib==1.6.0
+threadpoolctl==3.8.0
+python-dateutil==4.0.0
+six==1.17.0
+tzdata==2026.6

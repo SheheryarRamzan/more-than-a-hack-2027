@@ -22,7 +22,12 @@ possession", see §4):
 | gradient-boosted, tuned decoder, model's own dead-ball threshold (v3) | 0.4897 | 0.8441 |
 | + context features (§5), re-tuned decoder, larger trees (v4) | 0.5350 | 0.8614 |
 | + second-stage models and team-change snapping (§6), re-tuned decoder (v5) | 0.5558 | 0.8728 |
-| **submitted configuration** (v5, model's own dead-ball threshold, §6) | **0.5558** | **0.8728** |
+| + ball-touch features (§5), re-tuned decoder | 0.5939 | 0.8839 |
+| + three-member ensemble (§6), re-tuned decoder (v6) | 0.6025 | 0.8853 |
+| **submitted configuration** (v6, model's own dead-ball threshold, §6) | **0.6025** | **0.8853** |
+
+v6 against v5, per held-out match: 0.522 → 0.550, 0.507 → 0.536, 0.565 → 0.601, 0.561 → 0.620,
+0.559 → 0.625, 0.589 → 0.651, 0.586 → 0.635 — every match better, by 0.03–0.07.
 
 The organisers' baseline scores 0.2433 / 0.6724 on the competition match itself, so the degraded
 validation matches are about as hard as the real one (slightly harder).
@@ -112,6 +117,23 @@ running share, the ball going out in the last / next 5 s, and the share of missi
 On validation this was the largest single gain: 0.4897 → 0.5231 at unchanged decoder settings, and
 every one of the seven held-out matches improved, by 0.03–0.06.
 
+**Touches (v6).** After Link & Hoernig (2017, *Individual ball possession in soccer*, PLoS ONE): a
+player touches the ball when its velocity changes abruptly while they are within reach. The ball path
+is lightly smoothed, the velocity change is measured over ±3 frames, a candidate needs a player
+within 2 m and is credited to the nearer team, and candidates are thinned to local maxima (at most
+one per 0.2 s); only frames where the ball is seen qualify. The velocity threshold is **not a
+constant**: the ATD smooths the ball's path, so at a fixed 4 m/s the degraded open matches showed
+~5.5× more touches than the ATD — a model trained that way would misread the competition match, and
+validation could not notice. Each match therefore keeps its strongest 15 touches per minute of
+visible ball (the threshold is found by bisection), and both domains then give ~930–940 touches per
+match. Checks: on an open match 99 % of touches fall in live play and the touching team has the
+ball 0.5 s later 92 % of the time; on the competition match 95 % fall in play as v5 decoded it and
+87 % agree with v5's team, though v5 never saw touches. Team model: last and next touching team,
+how long ago / how soon, whether the last two touches were by the same team (a completed pass
+suggests control), and the home-minus-away touch balance over the past and next 5 s. Dead model:
+time since / until a touch (nobody touches a dead ball). Validation: 0.5558 → 0.5936 at unchanged
+decoder settings, the second-largest gain after context.
+
 ## 6. Models and decoding
 
 - **Per-frame models**: gradient-boosted trees (scikit-learn `HistGradientBoostingClassifier`, 200
@@ -128,29 +150,32 @@ every one of the seven held-out matches improved, by 0.03–0.06.
   fitted without it, so the second stage never learns from over-confident in-sample output.
   Validation: 0.5350 → 0.5485 at unchanged decoder settings; six of seven matches improved, one
   unchanged.
+- **Ensemble (v6)**: three members, each a first and a second stage, trained on disjoint frame
+  subsamples (every training row belongs to exactly one member); their log-odds are averaged.
+  Validation: 0.5939 → 0.6023 at unchanged settings, 0.6025 re-tuned. Each member is fitted with a
+  fixed seed, so the ensemble is as deterministic as one model.
 - **Stage 1, alive/dead**: Viterbi on the dead log-odds plus restart anchors; minimum stoppage and
   live-play durations; edges snapped to the ball leaving the pitch or the restart kick.
 - **Stage 2, home/away**: Viterbi on the team log-odds, decoded from one second before each restart
   so the player standing over the dead ball (the taker) sets the starting team; sustained bias to the
-  team Smart Tagging names on a located restart. Each home↔away change is then moved to the first
-  frame within ±0.5 s where the team gaining the ball has clear control (v5): the decoder places a
-  change where the smoothed evidence tips over, which can lag the moment the ball is won, and the
-  ranking metric scores boundary placement (snapping alone: 0.5350 → 0.5432).
+  team Smart Tagging names on a located restart. In v5 each home↔away change was then moved to the
+  first frame within ±0.5 s where the team gaining the ball has clear control, because the decoder
+  places a change where the smoothed evidence tips over, which can lag the moment the ball is won
+  (snapping alone: 0.5350 → 0.5432). With touch features the models place changes well enough on
+  their own, and snapping now costs a little (±0.5 s: 0.6006 vs off: 0.6025), so v6 turns it off.
 - **Settings**: chosen by coordinate descent on mean leave-one-match-out spellF1 (macroF1 breaking
-  ties), two passes, then the two settings that ended on a grid edge re-searched with a wider grid:
-  team switching cost 4 (v5; 8 in v4, 16 in v3 — each model generation is sharper and needs less
-  smoothing; with the second stage 4 / 6 / 8 / 12 / 16 score 0.5558 / 0.5541 / 0.5516 / 0.5480 /
-  0.5463), alive/dead switching cost 48 (48 / 96 / 192: 0.5558 / 0.5539 / 0.5430), snapping window
-  ±12 frames at control evidence ≥ 0.5, minimum stoppage 1 s, minimum live stretch 1.5 s, tag bias
-  0.5 per frame over ±1 s, restart look-back 1 s. The two switching costs sit at the low edge of
-  their grids, but the score is nearly flat there (0.0017 between 4 and 6), so going lower would
-  chase noise.
+  ties), re-run after every model change. v6: team switching cost 4 (2 / 4 / 6: 0.5978 / 0.6025 /
+  0.6023; 8 in v4, 16 in v3 — each model generation is sharper and needs less smoothing),
+  alive/dead switching cost 32 (32 / 48 / 96: 0.6025 / 0.6025 / 0.6010, tie broken by macroF1),
+  snapping off, minimum stoppage 1 s, minimum live stretch 1.5 s, tag bias 0.5 per frame over ±1 s,
+  restart look-back 1 s. The score is flat around the chosen values (within 0.002), so the exact
+  choice matters less than the models.
 - **Dead-ball share.** A rule fixed *before* looking at the competition match: keep the trained
   model's own alive/dead threshold if the dead share it gives there is plausible (0.43–0.53),
   otherwise shift the threshold to the league prior of 0.48 (LaLiga effective playing time over the
-  graded 105.9 minutes). The v3 and v4 models gave 0.416 / 0.417 and were shifted; **v5 gives
-  0.434, so its own threshold is kept** — which is also what scores best on validation (0.5558,
-  against 0.5480 with the share forced to 0.48).
+  graded 105.9 minutes). The v3 and v4 models gave 0.416 / 0.417 and were shifted; v5 gave 0.434
+  and **v6 gives 0.438, so its own threshold is kept** — which is also what scored best on
+  validation when the two were compared (v5: 0.5558, against 0.5480 with the share forced to 0.48).
 
 **Tried and dropped on validation**
 
@@ -191,8 +216,9 @@ averaged over in §4; (2) the final file is scored on it once, as a correctness 
 
 ## 9. Results on the competition match (aggregates only)
 
-v5 (submitted): 353 possessions of mean 10.2 s, dead share 0.434. Agreement with Smart Tagging's
-team phases is 0.750 (v4 at the same threshold: 0.749).
+v6 (submitted): 357 possessions of mean 10.0 s (median 5.5 s), dead share 0.438. Agreement with
+Smart Tagging's team phases is 0.748 (v5: 0.750, v4 at the same threshold: 0.749); 57 of 59 tagged
+set pieces located, the ball dead before 98 % of them and alive after all of them.
 
 Agreement with Smart Tagging's team phases (which the models never see) was 0.774 for v4 (dead
 share forced to 0.48), against 0.806 for v3. Checked before adopting v4: the drop comes from v4 predicting more short possessions (15 % of
@@ -208,26 +234,29 @@ validation *before* its check:
 |---|---|---|---|---|
 | v3 | 0.8121 | 0.3867 | 0.942 | 13 |
 | v4 | 0.8543 | 0.5250 | 0.961 | 15 |
-| v5 (submitted) | 0.8422 | 0.4706 | 0.960 | 17 |
+| v5 | 0.8422 | 0.4706 | 0.960 | 17 |
+| v6 (submitted) | 0.8788 | 0.5176 | 0.970 | 17 |
 
-v5 scores below v4 here and above it on validation (0.5558 vs 0.5350 over ~2,600 held-out
-possessions, six of seven matches better). With 17 possessions one possession matched or missed
-moves spellF1 by ~0.06 and the bootstrap band is ~0.33 wide, so these five minutes confirm that
-every version is correct and cannot rank them; choosing between versions on them would also be
-tuning on the public ground truth, which the rules forbid.
+The ranking of versions here does not follow validation (v5 scored below v4 here and above it on
+validation; v6 is above both on validation, 0.6025 over ~2,600 held-out possessions with every
+match better). With 17 possessions one possession matched or missed moves spellF1 by ~0.06 and the
+bootstrap band is ~0.33 wide, so these five minutes confirm that every version is correct and
+cannot rank them; choosing between versions on them would also be tuning on the public ground
+truth, which the rules forbid.
 
 ## 10. Limitations
 
 - **Domain shift.** The models are trained on official DFL tracking made to look like the automatic
   ATD; the degradation matches the ATD's ball-loss statistics, player dropout and tagging coverage,
-  but not everything (e.g. tracker identity switches, the ATD's own speed estimates).
+  but not everything (e.g. tracker identity switches, the ATD's own speed estimates, how smoothly it
+  draws the ball — the reason touches use a per-match threshold, §5).
 - **Label definition.** DFL possession is converted to controlled possession by a rule, and the
   rule's threshold is uncertain; results are averaged over three readings to stay robust to it.
-- **Under-segmentation.** On validation the tuned decoder predicts ~25 % fewer possessions than the
-  truth — the official metric prefers fewer, well-placed possessions to more, misplaced ones — so
-  short real possessions (quick turnovers) are often missed.
+- **Under-segmentation.** On validation the tuned decoder predicts ~21 % fewer possessions than the
+  truth (296 vs 375 per match) — the official metric prefers fewer, well-placed possessions to more,
+  misplaced ones — so short real possessions (quick turnovers) are often missed.
 - **Long ball gaps.** Two thirds of the ATD's missing ball time is in gaps over 20 s; inside them the
-  team call rests on context and collective shape (team accuracy 0.879 on validation).
+  team call rests on context and collective shape (team accuracy 0.890 on validation).
 - **Unused assets.** The videos and the broadcast feed; a ball detector on the tactical video is the
   most promising next step for the long gaps.
 
@@ -240,7 +269,7 @@ python -m venv .venv
 .venv/Scripts/python -m possession.run --name matrix_ae            # uses the committed models
 .venv/Scripts/python evaluation/validate_submission.py evaluation/results/matrix_ae.csv
 
-# optional: regenerate the models and the validation numbers (downloads ~2.5 GB of open data)
+# optional: regenerate the models (~25 min) and the validation numbers (downloads ~2.5 GB of open data)
 .venv/Scripts/python -m possession.train
 .venv/Scripts/python -m possession.validate
 .venv/Scripts/python -m possession.tune

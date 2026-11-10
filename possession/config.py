@@ -79,8 +79,8 @@ class Config:
     # decoded share matches. 0 disables this and keeps the model's own threshold.
     # Rule fixed before looking at the competition match: keep the trained model's own threshold if
     # the dead share it gives there is plausible (0.43-0.53), otherwise force 0.48. v3 and v4 gave
-    # 0.416 / 0.417 (forced to 0.48); v5 gives 0.434, so its own threshold is kept -- which is
-    # also what scores best on validation (0.5558 vs 0.5480 forced).
+    # 0.416 / 0.417 (forced to 0.48); v5 gave 0.434 and v6 gives 0.438, so the model's own
+    # threshold is kept -- which is also what scored best on validation (v5: 0.5558 vs 0.5480).
     target_dead_share: float = 0.0
     share_search_iters: int = 18
 
@@ -99,6 +99,11 @@ class Config:
     stack: int = 1                        # [validated] second stage on temporal aggregates: 0.5350 -> 0.5485
     stack_iter: int = 100                 # second stage: number of trees
     stack_leaves: int = 31                # second stage: leaves per tree
+    # [validated] ball touches (validate.touch_events, after Link & Hoernig 2017), with the
+    # threshold normalised per match to 15 touches per minute of visible ball: 0.5558 -> 0.5939
+    touch_features: int = 1
+    # [validated] members on disjoint frame subsamples, logits averaged: 0.5939 -> 0.6025 (tuned)
+    ensemble: int = 3
     model_dead_balanced: int = 0          # 0: learn the dead-ball base rate from the training games
     model_dead_scale: float = 1.0
     model_team_scale: float = 1.0
@@ -115,7 +120,7 @@ class Config:
     # -- stage 1: alive / dead decoding ----------------------------------------------------------
     # Decoder settings below marked [validated] were chosen by leave-one-match-out spellF1 on the
     # seven open IDSSE matches (possession/tune.py), never on the competition match.
-    alive_dead_switch: float = 48.0       # [validated] evidence needed to flip alive <-> dead
+    alive_dead_switch: float = 32.0       # [validated] evidence needed to flip alive <-> dead
     min_dead: int = 25                    # [validated] a stoppage shorter than 1 s is not one
     min_alive: int = 38                   # [validated] live play shorter than 1.5 s between stoppages
 
@@ -150,7 +155,9 @@ class Config:
     rule_ball_window: int = 50            # ball position read within 2 s before the restart
     rule_touch_window: int = 50           # last touch read within 2 s before the stoppage
     # Snap home<->away changes to the first frame of clear control (decode.snap_team_edges).
-    team_snap_window: int = 12            # [validated] frames either side searched; 0 disables
+    # [validated] frames either side searched; 0 disables. Helped v5 (+0.009); with touch features
+    # the models place team changes well enough on their own (0: 0.6025, 12: 0.6006).
+    team_snap_window: int = 0
     team_snap_threshold: float = 0.5      # |control evidence| that counts as clear control
 
     # -- boundary refinement ---------------------------------------------------------------------

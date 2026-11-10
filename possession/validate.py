@@ -99,6 +99,77 @@ def dead_context(feats):
              "ball_missing_share_5s"]
     return cols, names
 
+def touch_events(feats, rate=15.0, k=3, near=2.0, nms=5):
+    """(touch bool[n], team float[n]): abrupt changes of ball velocity with a player close by.
+
+    After Link & Hoernig (2017, "Individual ball possession in soccer"): a player touches the ball
+    when its velocity changes sharply while they are within reach. Positions are lightly smoothed,
+    velocity is a central difference, and the change is measured between t-k and t+k; candidates
+    need a player within `near` metres and are thinned to local maxima. team is +1 for a home
+    player, -1 for away, 0 where there is no touch. Only frames where the ball is seen qualify.
+
+    The velocity threshold is NOT a constant: tracking systems smooth the ball differently (at a
+    fixed 4 m/s the degraded open matches show ~5.5x more touches than the provided ATD), so each
+    match keeps its `rate` strongest touches per minute of visible graded ball. "Touch" then means
+    the same thing in training and in the competition match.
+    """
+    mm = features.moving_nanmean
+    n = feats["n"]
+    sx, sy = mm(feats["bx"], -1, 2), mm(feats["by"], -1, 2)
+    vx, vy = np.full(n, np.nan), np.full(n, np.nan)
+    vx[1:-1], vy[1:-1] = (sx[2:] - sx[:-2]) * 12.5, (sy[2:] - sy[:-2]) * 12.5
+    dv = np.full(n, np.nan)
+    dv[k:n - k] = np.hypot(vx[2 * k:] - vx[:n - 2 * k], vy[2 * k:] - vy[:n - 2 * k])
+    d_home, d_away = feats["d_home"], feats["d_away"]
+    base = feats["known"] & np.isfinite(dv) & (np.minimum(d_home, d_away) <= near)
+
+    def peaks(threshold):
+        cand = base & (dv >= threshold)
+        score = np.where(cand, dv, 0.0)
+        padded = np.concatenate((np.zeros(nms), score, np.zeros(nms)))
+        local = np.max(np.stack([padded[i:i + n] for i in range(2 * nms + 1)]), axis=0)
+        return cand & (score >= local)
+
+    target = rate * (feats["known"] & feats["graded"]).sum() / (25.0 * 60.0)
+    lo, hi = 0.5, 40.0                                   # bisection on the threshold (m/s)
+    for _ in range(20):
+        mid = 0.5 * (lo + hi)
+        if (peaks(mid) & feats["graded"]).sum() > target:
+            lo = mid
+        else:
+            hi = mid
+    peak = peaks(hi)
+    team = np.where(peak, np.where(d_home <= d_away, 1.0, -1.0), 0.0)
+    return peak, team
+
+
+def touch_context(feats):
+    """Team-model inputs from touches: last / next touching team and timing, a same-team pair (a
+    completed pass suggests control), and the home-minus-away touch balance over 5 s."""
+    mm = features.moving_nanmean
+    touch, team = touch_events(feats)
+    n = len(team)
+    since, until, last, nxt = _ages(touch)
+    last_team = np.where(last >= 0, team[np.maximum(last, 0)], 0.0)
+    next_team = np.where(nxt < n, team[np.minimum(nxt, n - 1)], 0.0)
+    # The touch before the last one: the last touch at or before (last - 1).
+    before = np.concatenate(([-1], last[:-1]))
+    last2 = np.where(last >= 1, before[np.maximum(last, 1)], -1)
+    same_pair = np.where((last2 >= 0) & (last >= 0) & (team[np.maximum(last2, 0)] == last_team),
+                         last_team, 0.0)
+    cols = [last_team, next_team, np.log1p(since), np.log1p(until), same_pair,
+            mm(team, -125, 0) * 125, mm(team, 1, 126) * 125]
+    names = ["last_touch_team", "next_touch_team", "log_s_since_touch", "log_s_until_touch",
+             "last_two_touches_same_team", "touch_balance_past_5s", "touch_balance_next_5s"]
+    return cols, names
+
+
+def dead_touch_context(feats):
+    """Dead-model inputs from touches: nobody touches a dead ball (until the restart)."""
+    touch, _ = touch_events(feats)
+    since, until, _, _ = _ages(touch)
+    return [np.log1p(since), np.log1p(until)], ["log_s_since_touch", "log_s_until_touch"]
+
 
 def team_matrix(feats, cfg=None):
     """Per-frame inputs of the team model. Columns oriented so positive favours home."""
@@ -110,6 +181,8 @@ def team_matrix(feats, cfg=None):
     X = np.column_stack(cols + [feats["team_x"]])
     if cfg is not None and cfg.context_features:
         X = np.column_stack([X] + team_context(feats)[0])
+    if cfg is not None and cfg.touch_features:
+        X = np.column_stack([X] + touch_context(feats)[0])
     return np.where(np.isfinite(X), X, 0.0)
 
 
@@ -118,6 +191,8 @@ def dead_matrix(feats, cfg=None):
     X = feats["dead_x"]
     if cfg is not None and cfg.context_features:
         X = np.column_stack([X] + dead_context(feats)[0])
+    if cfg is not None and cfg.touch_features:
+        X = np.column_stack([X] + dead_touch_context(feats)[0])
     return np.where(np.isfinite(X), X, 0.0)
 
 
@@ -129,6 +204,8 @@ def team_names(feats, cfg=None):
     names = CONTROL_NAMES + list(feats["team_x_names"])
     if cfg is not None and cfg.context_features:
         names += team_context(feats)[1]
+    if cfg is not None and cfg.touch_features:
+        names += touch_context(feats)[1]
     return names
 
 
@@ -136,6 +213,8 @@ def dead_names(feats, cfg=None):
     names = list(feats["dead_x_names"])
     if cfg is not None and cfg.context_features:
         names += dead_context(feats)[1]
+    if cfg is not None and cfg.touch_features:
+        names += dead_touch_context(feats)[1]
     return names
 
 
@@ -167,12 +246,12 @@ def prepare(cfg, matches=None, verbose=True, degrade_kw=None):
     return out
 
 
-def _rows(train, dead_mats, team_mats):
+def _rows(train, dead_mats, team_mats, offset=0):
     """Stacked training rows (every SUBSAMPLE-th graded frame) for the dead and team models."""
     dx, dy, tx, ty = [], [], [], []
     for p, dX, tX in zip(train, dead_mats, team_mats):
         truth = p["truths"][TRAIN_LEVEL]
-        idx = np.flatnonzero(p["feats"]["graded"])[::SUBSAMPLE]
+        idx = np.flatnonzero(p["feats"]["graded"])[offset::SUBSAMPLE]
         dx.append(dX[idx])
         dy.append((truth[idx] == "D").astype(float))
         alive = idx[np.isin(truth[idx], ["H", "A"])]
@@ -219,20 +298,29 @@ STAGE2_NAMES = [p + s for p in ("dead_", "team_") for s in
 
 
 def fit_models(train, cfg):
-    """(dead, team) models fitted on the training matches; with cfg.stack also the second stage,
-    trained on OUT-OF-FOLD first-stage predictions (each training match predicted by a first
-    stage fitted without it), returned as (dead1, team1, dead2, team2)."""
-    first = _fit_pair(*_rows(train, [p["dead_X"] for p in train], [p["team_X"] for p in train]),
-                      cfg)
+    """Models fitted on the training matches: one member, or with cfg.ensemble > 1 a list of
+    members trained on disjoint frame subsamples (offsets 0, 1, ... of every SUBSAMPLE-th frame)
+    whose log-odds are averaged."""
+    if cfg.ensemble <= 1:
+        return _fit_member(train, cfg, 0)
+    return [_fit_member(train, cfg, e) for e in range(cfg.ensemble)]
+
+
+def _fit_member(train, cfg, offset):
+    """(dead, team) models; with cfg.stack also the second stage, trained on OUT-OF-FOLD
+    first-stage predictions (each training match predicted by a first stage fitted without it),
+    returned as (dead1, team1, dead2, team2)."""
+    first = _fit_pair(*_rows(train, [p["dead_X"] for p in train], [p["team_X"] for p in train],
+                             offset), cfg)
     if not cfg.stack:
         return first
     mats = []
     for j, p in enumerate(train):
         others = train[:j] + train[j + 1:]
         d1, t1 = _fit_pair(*_rows(others, [q["dead_X"] for q in others],
-                                  [q["team_X"] for q in others]), cfg)
+                                  [q["team_X"] for q in others], offset), cfg)
         mats.append(stage2_matrix(p["feats"], _logit(p["dead_X"], d1), _logit(p["team_X"], t1)))
-    second = _fit_pair(*_rows(train, mats, mats), cfg, stage2=True)
+    second = _fit_pair(*_rows(train, mats, mats, offset), cfg, stage2=True)
     return first + second
 
 
@@ -257,24 +345,35 @@ def _logit(X, model):
 
 
 def model_scores(feats, team_X, models, cfg, dead_X=None):
-    """(ldead, team_score) per frame from fitted models."""
-    dead_model, team_model = models[0], models[1]
+    """(ldead, team_score) per frame from fitted models (one member, or a list averaged)."""
     dead_X = dead_matrix(feats, cfg) if dead_X is None else dead_X
-    for X, model, what in ((dead_X, dead_model, "dead"), (team_X, team_model, "team")):
-        expected = getattr(model, "n_features_in_", None)
-        if expected is not None and X.shape[1] != expected:
-            raise ValueError("{} model expects {} features, got {}: the config does not match the "
-                             "saved models (context_features?)".format(what, expected, X.shape[1]))
-    l_dead, l_team = _logit(dead_X, dead_model), _logit(team_X, team_model)
-    if len(models) == 4:                                  # second stage on temporal aggregates
-        X2 = stage2_matrix(feats, l_dead, l_team)
-        l_dead, l_team = _logit(X2, models[2]), _logit(X2, models[3])
+    members = models if isinstance(models, list) else [models]
+    l_dead, l_team = np.zeros(len(dead_X)), np.zeros(len(team_X))
+    for m in members:
+        d, t = _member_logits(feats, team_X, dead_X, m)
+        l_dead += d / len(members)
+        l_team += t / len(members)
     ldead = np.clip(l_dead * cfg.model_dead_scale
                     + cfg.dead_prior_logodds, -cfg.dead_evidence_clip, cfg.dead_evidence_clip)
     team = np.clip(l_team, -cfg.model_team_clip,
                    cfg.model_team_clip) * cfg.model_team_scale
     team = np.where(feats["direction"] != 0, team, 0.0)
     return ldead, team
+
+
+def _member_logits(feats, team_X, dead_X, models):
+    """Raw (dead, team) log-odds of one member: first stage, then the second stage if present."""
+    for X, model, what in ((dead_X, models[0], "dead"), (team_X, models[1], "team")):
+        expected = getattr(model, "n_features_in_", None)
+        if expected is not None and X.shape[1] != expected:
+            raise ValueError("{} model expects {} features, got {}: the config does not match the "
+                             "saved models (context / touch features?)".format(what, expected,
+                                                                               X.shape[1]))
+    l_dead, l_team = _logit(dead_X, models[0]), _logit(team_X, models[1])
+    if len(models) == 4:                                  # second stage on temporal aggregates
+        X2 = stage2_matrix(feats, l_dead, l_team)
+        l_dead, l_team = _logit(X2, models[2]), _logit(X2, models[3])
+    return l_dead, l_team
 
 
 def score(labels, truths):

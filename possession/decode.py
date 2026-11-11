@@ -19,30 +19,35 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if ROOT not in sys.path:
     sys.path.insert(0, ROOT)
 from games import GAME, half_video_blocks  # noqa: E402
-from possession.features import runs  # noqa: E402
+from possession.features import runs, touch_events  # noqa: E402
 
 LABEL_H, LABEL_A, LABEL_D, LABEL_X = "H", "A", "D", "X"
 
 
 def viterbi2(score1, switch, init1=0.0):
     """Best bool path for a 2-state chain: state True earns score1[t], False earns 0, every change
-    of state costs `switch`. init1 is an extra score for starting in state True. Ties stay put, so
-    the result is deterministic."""
+    of state costs `switch` -- or, with switch = (into_true, into_false), entering True at frame t
+    costs into_true[t] and entering False costs into_false[t]. init1 is an extra score for starting
+    in state True. Ties stay put, so the result is deterministic."""
     s = np.asarray(score1, dtype=np.float64).tolist()
     T = len(s)
     if T == 0:
         return np.zeros(0, dtype=bool)
+    if np.ndim(switch) == 0:
+        into1 = into0 = [switch] * T
+    else:
+        into1, into0 = (np.asarray(c, dtype=np.float64).tolist() for c in switch)
     from0 = bytearray(T)   # 1 if the best way into state False at t came from True
     from1 = bytearray(T)   # 1 if the best way into state True at t came from True
     v0, v1 = 0.0, s[0] + init1
     for t in range(1, T):
-        jump0 = v1 - switch
+        jump0 = v1 - into0[t]
         if jump0 > v0:
             n0 = jump0
             from0[t] = 1
         else:
             n0 = v0
-        jump1 = v0 - switch
+        jump1 = v0 - into1[t]
         if v1 >= jump1:
             n1 = v1 + s[t]
             from1[t] = 1
@@ -56,6 +61,14 @@ def viterbi2(score1, switch, init1=0.0):
         if t:
             state = from1[t] if state else from0[t]
     return path
+
+
+def within(mask, w):
+    """True on frames within +-w of a True in mask."""
+    n = len(mask)
+    c = np.concatenate(([0], np.cumsum(mask, dtype=np.int64)))
+    i = np.arange(n)
+    return c[np.minimum(i + w + 1, n)] > c[np.maximum(i - w, 0)]
 
 
 def anchors(feats, restarts, goal_spans, cfg):
@@ -175,6 +188,14 @@ def decode_teams(feats, dead, restarts, cfg, team_score=None):
     if cfg.rule_bias > 0:
         score += restart_rule_bias(feats, dead, cfg)
 
+    into = None                     # per-frame cost of a change to (home, away), if touch-aware
+    if cfg.team_touch_window > 0:
+        # A change of possession is cheap next to a touch by the team that gains the ball and
+        # dear anywhere else: the ball changes hands at a touch, not in the middle of a dribble.
+        _, touch_team = touch_events(feats)
+        into = [cfg.team_switch * np.where(within(touch_team * sign > 0, cfg.team_touch_window),
+                                           cfg.team_touch_cost, cfg.team_far_cost)
+                for sign in (1.0, -1.0)]
     home = np.zeros(n, dtype=bool)
     for _, first, last in feats["halves"]:
         lo, hi = first, last + 1
@@ -183,7 +204,8 @@ def decode_teams(feats, dead, restarts, cfg, team_score=None):
             # Decode from rw frames before the restart: whoever stands over the dead ball (the
             # taker) sets the starting team, then only the alive part is kept.
             lead = max(s - rw, lo)
-            home[s:e] = viterbi2(score[lead:e], cfg.team_switch)[s - lead:]
+            switch = cfg.team_switch if into is None else (into[0][lead:e], into[1][lead:e])
+            home[s:e] = viterbi2(score[lead:e], switch)[s - lead:]
             if cfg.team_snap_window > 0:
                 snap_team_edges(home, s, e, feats["team_ev"], cfg)
     return home

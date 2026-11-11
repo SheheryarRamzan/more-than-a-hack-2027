@@ -99,48 +99,8 @@ def dead_context(feats):
              "ball_missing_share_5s"]
     return cols, names
 
-def touch_events(feats, rate=15.0, k=3, near=2.0, nms=5):
-    """(touch bool[n], team float[n]): abrupt changes of ball velocity with a player close by.
 
-    After Link & Hoernig (2017, "Individual ball possession in soccer"): a player touches the ball
-    when its velocity changes sharply while they are within reach. Positions are lightly smoothed,
-    velocity is a central difference, and the change is measured between t-k and t+k; candidates
-    need a player within `near` metres and are thinned to local maxima. team is +1 for a home
-    player, -1 for away, 0 where there is no touch. Only frames where the ball is seen qualify.
-
-    The velocity threshold is NOT a constant: tracking systems smooth the ball differently (at a
-    fixed 4 m/s the degraded open matches show ~5.5x more touches than the provided ATD), so each
-    match keeps its `rate` strongest touches per minute of visible graded ball. "Touch" then means
-    the same thing in training and in the competition match.
-    """
-    mm = features.moving_nanmean
-    n = feats["n"]
-    sx, sy = mm(feats["bx"], -1, 2), mm(feats["by"], -1, 2)
-    vx, vy = np.full(n, np.nan), np.full(n, np.nan)
-    vx[1:-1], vy[1:-1] = (sx[2:] - sx[:-2]) * 12.5, (sy[2:] - sy[:-2]) * 12.5
-    dv = np.full(n, np.nan)
-    dv[k:n - k] = np.hypot(vx[2 * k:] - vx[:n - 2 * k], vy[2 * k:] - vy[:n - 2 * k])
-    d_home, d_away = feats["d_home"], feats["d_away"]
-    base = feats["known"] & np.isfinite(dv) & (np.minimum(d_home, d_away) <= near)
-
-    def peaks(threshold):
-        cand = base & (dv >= threshold)
-        score = np.where(cand, dv, 0.0)
-        padded = np.concatenate((np.zeros(nms), score, np.zeros(nms)))
-        local = np.max(np.stack([padded[i:i + n] for i in range(2 * nms + 1)]), axis=0)
-        return cand & (score >= local)
-
-    target = rate * (feats["known"] & feats["graded"]).sum() / (25.0 * 60.0)
-    lo, hi = 0.5, 40.0                                   # bisection on the threshold (m/s)
-    for _ in range(20):
-        mid = 0.5 * (lo + hi)
-        if (peaks(mid) & feats["graded"]).sum() > target:
-            lo = mid
-        else:
-            hi = mid
-    peak = peaks(hi)
-    team = np.where(peak, np.where(d_home <= d_away, 1.0, -1.0), 0.0)
-    return peak, team
+touch_events = features.touch_events      # moved: the team decoder uses it too
 
 
 def touch_context(feats):
@@ -246,9 +206,19 @@ def prepare(cfg, matches=None, verbose=True, degrade_kw=None):
     return out
 
 
-def _rows(train, dead_mats, team_mats, offset=0):
-    """Stacked training rows (every SUBSAMPLE-th graded frame) for the dead and team models."""
-    dx, dy, tx, ty = [], [], [], []
+def _spell_seconds(truth):
+    """Per frame, the length in seconds of the constant-label run it belongs to."""
+    change = np.flatnonzero(truth[1:] != truth[:-1]) + 1
+    lengths = np.diff(np.concatenate(([0], change, [len(truth)])))
+    return np.repeat(lengths, lengths) / 25.0
+
+
+def _rows(train, dead_mats, team_mats, offset=0, spell_weight=0.0):
+    """Stacked training rows (every SUBSAMPLE-th graded frame) for the dead and team models, and
+    a weight per team row: 1, or with spell_weight > 0 the possession's length ** -spell_weight
+    (lengths clipped to 0.5-60 s) so that short possessions are not drowned out by long ones --
+    the ranking metric counts possessions, not frames."""
+    dx, dy, tx, ty, tw = [], [], [], [], []
     for p, dX, tX in zip(train, dead_mats, team_mats):
         truth = p["truths"][TRAIN_LEVEL]
         idx = np.flatnonzero(p["feats"]["graded"])[offset::SUBSAMPLE]
@@ -257,10 +227,14 @@ def _rows(train, dead_mats, team_mats, offset=0):
         alive = idx[np.isin(truth[idx], ["H", "A"])]
         tx.append(tX[alive])
         ty.append((truth[alive] == "H").astype(float))
-    return tuple(map(np.concatenate, (dx, dy, tx, ty)))
+        if spell_weight > 0:
+            tw.append(np.clip(_spell_seconds(truth)[alive], 0.5, 60.0) ** -spell_weight)
+        else:
+            tw.append(np.ones(len(alive)))
+    return tuple(map(np.concatenate, (dx, dy, tx, ty, tw)))
 
 
-def _fit_pair(dx, dy, tx, ty, cfg, stage2=False):
+def _fit_pair(dx, dy, tx, ty, tw, cfg, stage2=False):
     """(dead_model, team_model): dead with the training games' base rate, team balanced."""
     w_dead = np.full(len(dy), 1.0 / len(dy))
     if cfg.model_dead_balanced:
@@ -268,18 +242,24 @@ def _fit_pair(dx, dy, tx, ty, cfg, stage2=False):
             w_dead[dy == c] = 0.5 / max((dy == c).sum(), 1)
     w_team = np.zeros(len(ty))
     for c in (0.0, 1.0):
-        w_team[ty == c] = 0.5 / max((ty == c).sum(), 1)
+        if cfg.spell_weight > 0:
+            w_team[ty == c] = 0.5 * tw[ty == c] / max(tw[ty == c].sum(), 1e-12)
+        else:
+            w_team[ty == c] = 0.5 / max((ty == c).sum(), 1)
     if cfg.model_hgb:
         return _fit_hgb(dx, dy, w_dead, cfg, stage2), _fit_hgb(tx, ty, w_team, cfg, stage2)
     return (calibrate.fit_logistic(dx, dy, w_dead * 2000.0, cfg.calib_l2),
             calibrate.fit_logistic(tx, ty, w_team * 2000.0, cfg.calib_l2))
 
 
-def stage2_matrix(feats, l_dead, l_team):
+def stage2_matrix(feats, l_dead, l_team, cfg=None):
     """Inputs of the second-stage models: temporal aggregates of the first-stage log-odds.
 
     Lets a model learn patterns over time that one frame cannot show -- evidence that flips and
     flips back (a deflection), team evidence fading into a stoppage, a restart's build-up.
+    With cfg.stack_features >= 2 also shorter windows, explicit next-minus-past changes (trees
+    approximate the difference of two inputs poorly, and a change is what marks a boundary) and,
+    with touch features on, the touch context.
     """
     mm = features.moving_nanmean
     cols = []
@@ -288,6 +268,12 @@ def stage2_matrix(feats, l_dead, l_team):
         cols += [l, mm(l, -25, 0), mm(l, 1, 26), mm(l, -125, 0), mm(l, 1, 126),
                  mm(l, -375, 376), mm(flips.astype(float), -50, 51)]
     cols += [feats["team_ev"], feats["known"].astype(float)]
+    if cfg is not None and cfg.stack_features >= 2:
+        for l in (l_dead, l_team):
+            cols += [mm(l, -12, 0), mm(l, 1, 13), mm(l, -50, 0), mm(l, 1, 51),
+                     mm(l, 1, 26) - mm(l, -25, 0), mm(l, 1, 126) - mm(l, -125, 0)]
+        if cfg.touch_features:
+            cols += touch_context(feats)[0]
     X = np.column_stack(cols)
     return np.where(np.isfinite(X), X, 0.0)
 
@@ -295,6 +281,17 @@ def stage2_matrix(feats, l_dead, l_team):
 STAGE2_NAMES = [p + s for p in ("dead_", "team_") for s in
                 ("logit", "past_1s", "next_1s", "past_5s", "next_5s", "15s", "flip_rate_2s")] \
     + ["control", "ball_known"]
+
+
+def stage2_names(feats, cfg=None):
+    """Column names of stage2_matrix for this config."""
+    names = list(STAGE2_NAMES)
+    if cfg is not None and cfg.stack_features >= 2:
+        names += [p + s for p in ("dead_", "team_") for s in
+                  ("past_0.5s", "next_0.5s", "past_2s", "next_2s", "change_1s", "change_5s")]
+        if cfg.touch_features:
+            names += touch_context(feats)[1]
+    return names
 
 
 def fit_models(train, cfg):
@@ -310,17 +307,19 @@ def _fit_member(train, cfg, offset):
     """(dead, team) models; with cfg.stack also the second stage, trained on OUT-OF-FOLD
     first-stage predictions (each training match predicted by a first stage fitted without it),
     returned as (dead1, team1, dead2, team2)."""
+    sw = cfg.spell_weight
     first = _fit_pair(*_rows(train, [p["dead_X"] for p in train], [p["team_X"] for p in train],
-                             offset), cfg)
+                             offset, sw), cfg)
     if not cfg.stack:
         return first
     mats = []
     for j, p in enumerate(train):
         others = train[:j] + train[j + 1:]
         d1, t1 = _fit_pair(*_rows(others, [q["dead_X"] for q in others],
-                                  [q["team_X"] for q in others], offset), cfg)
-        mats.append(stage2_matrix(p["feats"], _logit(p["dead_X"], d1), _logit(p["team_X"], t1)))
-    second = _fit_pair(*_rows(train, mats, mats, offset), cfg, stage2=True)
+                                  [q["team_X"] for q in others], offset, sw), cfg)
+        mats.append(stage2_matrix(p["feats"], _logit(p["dead_X"], d1), _logit(p["team_X"], t1),
+                                  cfg))
+    second = _fit_pair(*_rows(train, mats, mats, offset, sw), cfg, stage2=True)
     return first + second
 
 
@@ -350,7 +349,7 @@ def model_scores(feats, team_X, models, cfg, dead_X=None):
     members = models if isinstance(models, list) else [models]
     l_dead, l_team = np.zeros(len(dead_X)), np.zeros(len(team_X))
     for m in members:
-        d, t = _member_logits(feats, team_X, dead_X, m)
+        d, t = _member_logits(feats, team_X, dead_X, m, cfg)
         l_dead += d / len(members)
         l_team += t / len(members)
     ldead = np.clip(l_dead * cfg.model_dead_scale
@@ -361,7 +360,7 @@ def model_scores(feats, team_X, models, cfg, dead_X=None):
     return ldead, team
 
 
-def _member_logits(feats, team_X, dead_X, models):
+def _member_logits(feats, team_X, dead_X, models, cfg=None):
     """Raw (dead, team) log-odds of one member: first stage, then the second stage if present."""
     for X, model, what in ((dead_X, models[0], "dead"), (team_X, models[1], "team")):
         expected = getattr(model, "n_features_in_", None)
@@ -371,7 +370,11 @@ def _member_logits(feats, team_X, dead_X, models):
                                                                                X.shape[1]))
     l_dead, l_team = _logit(dead_X, models[0]), _logit(team_X, models[1])
     if len(models) == 4:                                  # second stage on temporal aggregates
-        X2 = stage2_matrix(feats, l_dead, l_team)
+        X2 = stage2_matrix(feats, l_dead, l_team, cfg)
+        expected = getattr(models[2], "n_features_in_", None)
+        if expected is not None and X2.shape[1] != expected:
+            raise ValueError("second-stage models expect {} features, got {}: the config does not "
+                             "match the saved models (stack_features?)".format(expected, X2.shape[1]))
         l_dead, l_team = _logit(X2, models[2]), _logit(X2, models[3])
     return l_dead, l_team
 

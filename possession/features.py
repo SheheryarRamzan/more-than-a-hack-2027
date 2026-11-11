@@ -131,6 +131,50 @@ def player_speeds(px, py, ps):
     return np.hypot(vx, vy)
 
 
+def touch_events(feats, rate=15.0, k=3, near=2.0, nms=5):
+    """(touch bool[n], team float[n]): abrupt changes of ball velocity with a player close by.
+
+    After Link & Hoernig (2017, "Individual ball possession in soccer"): a player touches the ball
+    when its velocity changes sharply while they are within reach. Positions are lightly smoothed,
+    velocity is a central difference, and the change is measured between t-k and t+k; candidates
+    need a player within `near` metres and are thinned to local maxima. team is +1 for a home
+    player, -1 for away, 0 where there is no touch. Only frames where the ball is seen qualify.
+
+    The velocity threshold is NOT a constant: tracking systems smooth the ball differently (at a
+    fixed 4 m/s the degraded open matches show ~5.5x more touches than the provided ATD), so each
+    match keeps its `rate` strongest touches per minute of visible graded ball. "Touch" then means
+    the same thing in training and in the competition match.
+    """
+    mm = moving_nanmean
+    n = feats["n"]
+    sx, sy = mm(feats["bx"], -1, 2), mm(feats["by"], -1, 2)
+    vx, vy = np.full(n, np.nan), np.full(n, np.nan)
+    vx[1:-1], vy[1:-1] = (sx[2:] - sx[:-2]) * 12.5, (sy[2:] - sy[:-2]) * 12.5
+    dv = np.full(n, np.nan)
+    dv[k:n - k] = np.hypot(vx[2 * k:] - vx[:n - 2 * k], vy[2 * k:] - vy[:n - 2 * k])
+    d_home, d_away = feats["d_home"], feats["d_away"]
+    base = feats["known"] & np.isfinite(dv) & (np.minimum(d_home, d_away) <= near)
+
+    def peaks(threshold):
+        cand = base & (dv >= threshold)
+        score = np.where(cand, dv, 0.0)
+        padded = np.concatenate((np.zeros(nms), score, np.zeros(nms)))
+        local = np.max(np.stack([padded[i:i + n] for i in range(2 * nms + 1)]), axis=0)
+        return cand & (score >= local)
+
+    target = rate * (feats["known"] & feats["graded"]).sum() / (25.0 * 60.0)
+    lo, hi = 0.5, 40.0                                   # bisection on the threshold (m/s)
+    for _ in range(20):
+        mid = 0.5 * (lo + hi)
+        if (peaks(mid) & feats["graded"]).sum() > target:
+            lo = mid
+        else:
+            hi = mid
+    peak = peaks(hi)
+    team = np.where(peak, np.where(d_home <= d_away, 1.0, -1.0), 0.0)
+    return peak, team
+
+
 def gmm_llr(values, fit_mask, clip):
     """Log-likelihood ratio low-vs-high component of a 2-Gaussian mixture on log(values).
 

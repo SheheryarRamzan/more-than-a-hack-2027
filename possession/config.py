@@ -79,8 +79,9 @@ class Config:
     # decoded share matches. 0 disables this and keeps the model's own threshold.
     # Rule fixed before looking at the competition match: keep the trained model's own threshold if
     # the dead share it gives there is plausible (0.43-0.53), otherwise force 0.48. v3 and v4 gave
-    # 0.416 / 0.417 (forced to 0.48); v5 gave 0.434 and v6 gives 0.438, so the model's own
-    # threshold is kept -- which is also what scored best on validation (v5: 0.5558 vs 0.5480).
+    # 0.416 / 0.417 (forced to 0.48); v5 gave 0.434, v6 0.438 and v7 gives 0.430, so the model's
+    # own threshold is kept -- which is also what scored best on validation (v5: 0.5558 vs 0.5480;
+    # on the held-out matches v7's own share is off by -0.006 on average, and forcing it costs).
     target_dead_share: float = 0.0
     share_search_iters: int = 18
 
@@ -99,7 +100,16 @@ class Config:
     stack: int = 1                        # [validated] second stage on temporal aggregates: 0.5350 -> 0.5485
     stack_iter: int = 100                 # second stage: number of trees
     stack_leaves: int = 31                # second stage: leaves per tree
-    # [validated] ball touches (validate.touch_events, after Link & Hoernig 2017), with the
+    # [validated] second-stage inputs. 1: each logit, its mean over the past / next 1 s and 5 s, a
+    # centred 15 s mean and a 2 s flip rate. 2 (v7): also past / next 0.5 s and 2 s, next-minus-past
+    # changes over 1 s and 5 s, and the touch context, so the second stage sees the moment
+    # possession turns over: 0.6025 -> 0.6087 (3-member ensemble), 6 of 7 matches better.
+    stack_features: int = 2
+    # [validated] OFF: team rows weighted by possession length ** -spell_weight, so short
+    # possessions count like long ones in training. Alone +0.008 on one member; on top of
+    # stack_features=2 nothing (0.25: 0.6041, 0.5: 0.6029, vs 0.6043).
+    spell_weight: float = 0.0
+    # [validated] ball touches (features.touch_events, after Link & Hoernig 2017), with the
     # threshold normalised per match to 15 touches per minute of visible ball: 0.5558 -> 0.5939
     touch_features: int = 1
     # [validated] members on disjoint frame subsamples, logits averaged: 0.5939 -> 0.6025 (tuned)
@@ -140,7 +150,8 @@ class Config:
     # -- stage 2: home / away decoding -----------------------------------------------------------
     # [validated] Evidence (in team-model log-odds summed over frames) needed to hand possession
     # to the other team: a touch or a deflection does not pay it, sustained control does.
-    team_switch: float = 4.0
+    # v7: 3 (2 / 3 / 4 / 6: 0.6080 / 0.6103 / 0.6087 / 0.6064; picked in every nested fold).
+    team_switch: float = 3.0
     # Each alive stretch is decoded together with the restart_window frames before it, so the
     # player standing over the dead ball -- the taker -- decides who starts with it.
     restart_window: int = 25
@@ -159,6 +170,14 @@ class Config:
     # the models place team changes well enough on their own (0: 0.6025, 12: 0.6006).
     team_snap_window: int = 0
     team_snap_threshold: float = 0.5      # |control evidence| that counts as clear control
+    # Touch-aware switching (decode.decode_teams): a change of possession to a team costs
+    # team_switch * team_touch_cost within team_touch_window frames of a touch by that team
+    # (features.touch_events), and team_switch * team_far_cost anywhere else. 0 disables.
+    # [validated] OFF: +0.005 to +0.008 on single members (nested), but nothing on the averaged
+    # ensemble (v6: -0.002, v7: +0.000) -- it was smoothing member noise the ensemble removes.
+    team_touch_window: int = 0
+    team_touch_cost: float = 0.75
+    team_far_cost: float = 4.0
 
     # -- boundary refinement ---------------------------------------------------------------------
     snap_kick_window: int = 50            # a dead->alive edge snaps to a kick within ±2 s

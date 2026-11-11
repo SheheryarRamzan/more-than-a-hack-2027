@@ -80,8 +80,12 @@ def main(argv=None):
     with open(os.path.join(args.out_dir, args.name + ".json"), "w") as handle:
         json.dump({"name": args.name, "config": asdict(cfg), "summary": summary}, handle, indent=2)
 
-    print("\nwrote {}  ({:.1f} s)".format(os.path.relpath(path, ROOT), time.time() - started))
-    print("next:  python evaluation/validate_submission.py {}".format(os.path.relpath(path, ROOT)))
+    try:
+        shown = os.path.relpath(path, ROOT)
+    except ValueError:                                    # --out-dir on another Windows drive
+        shown = path
+    print("\nwrote {}  ({:.1f} s)".format(shown, time.time() - started))
+    print("next:  python evaluation/validate_submission.py {}".format(shown))
     return path
 
 

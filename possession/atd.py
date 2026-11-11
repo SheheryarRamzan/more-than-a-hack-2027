@@ -186,7 +186,11 @@ def load(source="tactical", use_cache=True, verbose=True):
         stored = np.load(cache)
         if np.array_equal(stored["stamp"], stamp):
             if verbose:
-                print("tracking: loaded cache {}".format(os.path.relpath(cache, ROOT)))
+                try:
+                    shown = os.path.relpath(cache, ROOT)
+                except ValueError:                        # data on another Windows drive
+                    shown = cache
+                print("tracking: loaded cache {}".format(shown))
             return {"players": stored["players"], "ball": stored["ball"],
                     "present": stored["present"], "team": team, "home": home, "away": away,
                     "notes": notes}

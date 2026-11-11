@@ -10,9 +10,11 @@
 > ```bash
 > python -m venv .venv
 > .venv/bin/python -m pip install -r requirements-solution.txt   # .venv\Scripts\python on Windows
-> .venv/bin/python -m possession.run --name matrix_ae            # -> evaluation/results/matrix_ae.csv
-> .venv/bin/python evaluation/validate_submission.py evaluation/results/matrix_ae.csv
+> .venv/bin/python -m possession.run --name "Matrix AE"          # -> evaluation/results/Matrix AE.csv
+> .venv/bin/python evaluation/validate_submission.py "evaluation/results/Matrix AE.csv"
 > ```
+>
+> That file is byte-for-byte the submitted `Matrix AE.csv`.
 >
 > Deterministic: verified byte-identical from a fresh clone in a fresh environment. Our code is
 > in `possession/`; everything below this box is the organisers' original README.

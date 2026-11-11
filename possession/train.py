@@ -46,8 +46,9 @@ def _unpack(d):
 def _pack_member(models, names):
     d = {"dead": _pack(models[0], names[0]), "team": _pack(models[1], names[1])}
     if len(models) == 4:
-        d["dead2"] = _pack(models[2], validate.STAGE2_NAMES)
-        d["team2"] = _pack(models[3], validate.STAGE2_NAMES)
+        names2 = names[2] if len(names) > 2 else validate.STAGE2_NAMES
+        d["dead2"] = _pack(models[2], names2)
+        d["team2"] = _pack(models[3], names2)
     return d
 
 
@@ -85,7 +86,8 @@ def main():
     prepared = validate.prepare(cfg, list(external.MATCHES))
     models = validate.fit_models(prepared, cfg)
     names = (validate.dead_names(prepared[0]["feats"], cfg),
-             validate.team_names(prepared[0]["feats"], cfg))
+             validate.team_names(prepared[0]["feats"], cfg),
+             validate.stage2_names(prepared[0]["feats"], cfg))
     path = save_models(models, names, matches=external.MATCHES)
     print("wrote {}".format(os.path.relpath(path, ROOT)))
     first = models[0] if isinstance(models, list) else models
